@@ -1,4 +1,4 @@
-```md
+
 # Hi, I'm Shubham Joshi
 
 Cloud & AI Engineer focused on building scalable backend systems, cloud-native applications, distributed architectures, and applied AI solutions on AWS.
@@ -171,4 +171,4 @@ Currently exploring:
 # About Me
 
 I enjoy building systems that combine cloud infrastructure, backend engineering, distributed architectures, and applied AI into fully deployed real-world applications.
-```
+
