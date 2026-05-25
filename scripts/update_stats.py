@@ -233,7 +233,7 @@ def format_count(value):
 def update_svg(path, stats):
     content = path.read_text(encoding="utf-8")
     line_1 = f"Repos: {stats['repos']} | Commits: {stats['commits']}"
-    line_2 = f"{stats['loc']} | (+{stats['added']}, -{stats['deleted']})"
+    line_2 = f"LOC: {stats['loc']} | (+{stats['added']}, -{stats['deleted']})"
 
     replacements = {
         "stats-line-1": escape(line_1),
