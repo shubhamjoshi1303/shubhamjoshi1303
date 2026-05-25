@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import tempfile
 import subprocess
 import urllib.error
 import urllib.request
@@ -68,31 +69,63 @@ def github_json(path):
         raise RuntimeError(f"GitHub API request failed: {error.code} {body}") from error
 
 
+def github_paginated(path):
+    page = 1
+    results = []
+
+    while True:
+        separator = "&" if "?" in path else "?"
+        data = github_json(f"{path}{separator}per_page=100&page={page}")
+        if not data:
+            return results
+
+        results.extend(data)
+        page += 1
+
+
 def public_repo_count():
     user = github_json(f"/users/{USERNAME}")
     return int(user["public_repos"])
 
 
-def recent_activity_count():
-    events = github_json(f"/users/{USERNAME}/events/public?per_page=100")
-    count = 0
-
-    for event in events:
-        if event.get("type") == "PushEvent":
-            count += len(event.get("payload", {}).get("commits", []))
-        elif event.get("type") in {"CreateEvent", "PullRequestEvent", "IssuesEvent"}:
-            count += 1
-
-    return count
+def public_source_repos():
+    repos = github_paginated(f"/users/{USERNAME}/repos?type=owner&sort=full_name")
+    return [repo for repo in repos if not repo.get("fork")]
 
 
-def run_command(args):
-    return subprocess.check_output(args, cwd=ROOT, text=True, stderr=subprocess.DEVNULL)
+def run_command(args, cwd=ROOT):
+    return subprocess.check_output(args, cwd=cwd, text=True, stderr=subprocess.DEVNULL)
 
 
-def line_count_with_tokei():
+def clone_repo(repo, destination):
+    clone_url = repo["clone_url"]
+    args = [
+        "git",
+        "clone",
+        "--quiet",
+        "--depth",
+        "1",
+        "--single-branch",
+    ]
+
+    default_branch = repo.get("default_branch")
+    if default_branch:
+        args.extend(["--branch", default_branch])
+
+    args.extend([clone_url, str(destination)])
+    run_command(args)
+
+    # A shallow clone keeps initial checkout fast. Unshallow when possible so
+    # history totals reflect the full default branch instead of only depth=1.
     try:
-        output = run_command(["tokei", ".", "--output", "json"])
+        run_command(["git", "fetch", "--quiet", "--unshallow"], cwd=destination)
+    except subprocess.CalledProcessError:
+        pass
+
+
+def line_count_with_tokei(path):
+    try:
+        output = run_command(["tokei", ".", "--output", "json"], cwd=path)
     except (FileNotFoundError, subprocess.CalledProcessError):
         return None
 
@@ -109,11 +142,11 @@ def should_count(path, relative_path):
     return path.is_file() and path.suffix.lower() in SOURCE_EXTENSIONS
 
 
-def fallback_line_count():
+def fallback_line_count(root):
     total = 0
 
-    for path in ROOT.rglob("*"):
-        relative_path = path.relative_to(ROOT)
+    for path in root.rglob("*"):
+        relative_path = path.relative_to(root)
         if not should_count(path, relative_path):
             continue
 
@@ -127,15 +160,66 @@ def fallback_line_count():
     return total
 
 
-def line_count():
-    return line_count_with_tokei() or fallback_line_count()
+def line_count(path):
+    return line_count_with_tokei(path) or fallback_line_count(path)
 
 
-def added_deleted_lines():
-    output = run_command(["git", "log", "--shortstat", "--pretty=format:"])
+def commit_count(path):
+    try:
+        return int(run_command(["git", "rev-list", "--count", "HEAD"], cwd=path).strip())
+    except subprocess.CalledProcessError:
+        return 0
+
+
+def added_deleted_lines(path):
+    try:
+        output = run_command(
+            ["git", "log", "--shortstat", "--pretty=format:"],
+            cwd=path,
+        )
+    except subprocess.CalledProcessError:
+        return 0, 0
+
     added = sum(int(value) for value in re.findall(r"(\d+) insertions?", output))
     deleted = sum(int(value) for value in re.findall(r"(\d+) deletions?", output))
     return added, deleted
+
+
+def aggregate_repo_stats():
+    totals = {
+        "commits": 0,
+        "loc": 0,
+        "added": 0,
+        "deleted": 0,
+    }
+    repos = public_source_repos()
+
+    with tempfile.TemporaryDirectory(prefix="profile-stats-") as temp_dir:
+        temp_root = Path(temp_dir)
+
+        for repo in repos:
+            repo_name = repo["name"]
+            repo_path = temp_root / repo_name
+
+            if repo.get("size", 0) == 0:
+                print(f"Skipping {repo['full_name']}: empty repo")
+                continue
+
+            print(f"Cloning {repo['full_name']}...")
+
+            try:
+                clone_repo(repo, repo_path)
+            except subprocess.CalledProcessError as error:
+                print(f"Skipping {repo['full_name']}: clone failed ({error.returncode})")
+                continue
+
+            added, deleted = added_deleted_lines(repo_path)
+            totals["commits"] += commit_count(repo_path)
+            totals["loc"] += line_count(repo_path)
+            totals["added"] += added
+            totals["deleted"] += deleted
+
+    return totals
 
 
 def format_count(value):
@@ -171,13 +255,13 @@ def update_svg(path, stats):
 
 
 def main():
-    added, deleted = added_deleted_lines()
+    repo_stats = aggregate_repo_stats()
     stats = {
         "repos": format_count(public_repo_count()),
-        "commits": format_count(recent_activity_count()),
-        "loc": format_count(line_count()),
-        "added": format_count(added),
-        "deleted": format_count(deleted),
+        "commits": format_count(repo_stats["commits"]),
+        "loc": format_count(repo_stats["loc"]),
+        "added": format_count(repo_stats["added"]),
+        "deleted": format_count(repo_stats["deleted"]),
     }
 
     for path in SVG_FILES:
