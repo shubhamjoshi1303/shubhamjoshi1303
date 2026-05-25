@@ -83,5 +83,5 @@
 
   <text x="560" y="530" class="label">GitHub Stats:</text>
   <text x="790" y="530" class="text" id="stats-line-1">Repos: 20 | Commits: 135</text>
-  <text x="790" y="555" class="text" id="stats-line-2">26.6K | (+125.9K, -3.2K)</text>
+  <text x="790" y="555" class="text" id="stats-line-2">LOC: 26.6K | (+125.9K, -3.2K)</text>
 </svg>
