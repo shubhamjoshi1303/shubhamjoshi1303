@@ -1,84 +1,194 @@
-import requests
-import subprocess
+import json
+import os
 import re
+import subprocess
+import urllib.error
+import urllib.request
+from html import escape
+from pathlib import Path
+
 
 USERNAME = "shubhamjoshi1303"
+ROOT = Path(__file__).resolve().parents[1]
+SVG_FILES = (ROOT / "dark_mode.svg", ROOT / "light_mode.svg")
 
-# -------------------------
-# Get repo count
-# -------------------------
+EXCLUDED_DIRS = {
+    ".git",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "vendor",
+}
 
-user = requests.get(
-    f"https://api.github.com/users/{USERNAME}"
-).json()
+SOURCE_EXTENSIONS = {
+    ".c",
+    ".cc",
+    ".cpp",
+    ".css",
+    ".go",
+    ".h",
+    ".html",
+    ".java",
+    ".js",
+    ".json",
+    ".jsx",
+    ".md",
+    ".py",
+    ".rb",
+    ".rs",
+    ".sh",
+    ".svg",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
 
-repos = user["public_repos"]
 
-# -------------------------
-# Get commit count
-# -------------------------
+def github_json(path):
+    token = os.environ.get("GITHUB_TOKEN")
+    request = urllib.request.Request(
+        f"https://api.github.com{path}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "profile-readme-stats-updater",
+            **({"Authorization": f"Bearer {token}"} if token else {}),
+        },
+    )
 
-events = requests.get(
-    f"https://api.github.com/users/{USERNAME}/events"
-).json()
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"GitHub API request failed: {error.code} {body}") from error
 
-commits = 0
 
-for event in events:
-    if event["type"] == "PushEvent":
-        commits += len(event["payload"]["commits"])
+def public_repo_count():
+    user = github_json(f"/users/{USERNAME}")
+    return int(user["public_repos"])
 
-# -------------------------
-# LOC using tokei
-# -------------------------
 
-result = subprocess.check_output(
-    ["tokei", "."]
-).decode()
+def recent_activity_count():
+    events = github_json(f"/users/{USERNAME}/events/public?per_page=100")
+    count = 0
 
-match = re.search(r"Total\s+\d+\s+\d+\s+\d+\s+(\d+)", result)
+    for event in events:
+        if event.get("type") == "PushEvent":
+            count += len(event.get("payload", {}).get("commits", []))
+        elif event.get("type") in {"CreateEvent", "PullRequestEvent", "IssuesEvent"}:
+            count += 1
 
-loc = match.group(1) if match else "0"
+    return count
 
-# -------------------------
-# Added / deleted lines
-# -------------------------
 
-git_stats = subprocess.check_output(
-    "git log --shortstat --pretty=format:",
-    shell=True
-).decode()
+def run_command(args):
+    return subprocess.check_output(args, cwd=ROOT, text=True, stderr=subprocess.DEVNULL)
 
-added = sum(
-    int(x)
-    for x in re.findall(r"(\d+) insertions?", git_stats)
-)
 
-deleted = sum(
-    int(x)
-    for x in re.findall(r"(\d+) deletions?", git_stats)
-)
+def line_count_with_tokei():
+    try:
+        output = run_command(["tokei", ".", "--output", "json"])
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
 
-# format nicely
-added = f"{added//1000}K" if added > 1000 else str(added)
-deleted = f"{deleted//1000}K" if deleted > 1000 else str(deleted)
+    try:
+        data = json.loads(output)
+        return int(data["Total"]["code"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
 
-# -------------------------
-# Replace placeholders
-# -------------------------
 
-for file in ["dark_mode.svg", "light_mode.svg"]:
+def should_count(path, relative_path):
+    if any(part in EXCLUDED_DIRS for part in relative_path.parts):
+        return False
+    return path.is_file() and path.suffix.lower() in SOURCE_EXTENSIONS
 
-    with open(file, "r", encoding="utf-8") as f:
-        content = f.read()
 
-    content = content.replace("{{REPOS}}", str(repos))
-    content = content.replace("{{COMMITS}}", str(commits))
-    content = content.replace("{{LOC}}", str(loc))
-    content = content.replace("{{ADDED}}", added)
-    content = content.replace("{{DELETED}}", deleted)
+def fallback_line_count():
+    total = 0
 
-    with open(file, "w", encoding="utf-8") as f:
-        f.write(content)
+    for path in ROOT.rglob("*"):
+        relative_path = path.relative_to(ROOT)
+        if not should_count(path, relative_path):
+            continue
 
-print("Updated SVG stats.")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+
+        total += sum(1 for line in text.splitlines() if line.strip())
+
+    return total
+
+
+def line_count():
+    return line_count_with_tokei() or fallback_line_count()
+
+
+def added_deleted_lines():
+    output = run_command(["git", "log", "--shortstat", "--pretty=format:"])
+    added = sum(int(value) for value in re.findall(r"(\d+) insertions?", output))
+    deleted = sum(int(value) for value in re.findall(r"(\d+) deletions?", output))
+    return added, deleted
+
+
+def format_count(value):
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M".replace(".0M", "M")
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}K".replace(".0K", "K")
+    return str(value)
+
+
+def update_svg(path, stats):
+    content = path.read_text(encoding="utf-8")
+    line_1 = f"Repos: {stats['repos']} | Commits: {stats['commits']}"
+    line_2 = f"{stats['loc']} | (+{stats['added']}, -{stats['deleted']})"
+
+    replacements = {
+        "stats-line-1": escape(line_1),
+        "stats-line-2": escape(line_2),
+    }
+
+    for element_id, text in replacements.items():
+        content, count = re.subn(
+            rf'(<text\b[^>]*\bid="{element_id}"[^>]*>).*?(</text>)',
+            lambda match: f"{match.group(1)}{text}{match.group(2)}",
+            content,
+            count=1,
+            flags=re.DOTALL,
+        )
+        if count != 1:
+            raise RuntimeError(f"Could not update {element_id} in {path.name}")
+
+    path.write_text(content, encoding="utf-8")
+
+
+def main():
+    added, deleted = added_deleted_lines()
+    stats = {
+        "repos": format_count(public_repo_count()),
+        "commits": format_count(recent_activity_count()),
+        "loc": format_count(line_count()),
+        "added": format_count(added),
+        "deleted": format_count(deleted),
+    }
+
+    for path in SVG_FILES:
+        update_svg(path, stats)
+
+    print(
+        "Updated SVG stats: "
+        f"repos={stats['repos']}, commits={stats['commits']}, loc={stats['loc']}, "
+        f"added={stats['added']}, deleted={stats['deleted']}"
+    )
+
+
+if __name__ == "__main__":
+    main()

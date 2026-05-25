@@ -21,12 +21,9 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install tokei
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tokei
-
       - name: Run stats updater
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: python scripts/update_stats.py
 
       - name: Commit updated SVGs
